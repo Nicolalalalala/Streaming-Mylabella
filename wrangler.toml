@@ -1,10 +1,11 @@
-# Pezzotto Worker — Cloudflare Worker
-name = "pezzotto-worker"
+# Streaming Mylabella — Cloudflare Worker
+name = "streaming-mylabella"
 main = "src/index.ts"
 compatibility_date = "2025-04-04"
 
-# Rotta personalizzata (opzionale, cambia con un dominio tuo)
-# route = "pezzotto.tuodominio.it/*"
+# Dominio custom (dopo il primo deploy, attiva su Cloudflare Dashboard
+# → Workers & Pages → streaming-mylabella → Triggers → Custom Domains)
+# route = "streaming.mylabella.it/*"
 
 [observability]
 enabled = true
