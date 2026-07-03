@@ -1,7 +1,7 @@
 # Streaming Mylabella — Cloudflare Workers
 
-Addon Stremio per canali IPTV da [iptv-org/iptv](https://github.com/iptv-org/iptv).
-Serverless su Cloudflare Workers. Niente server locale, niente VPN.
+Addon Stremio per canali IPTV da [iptv-org/iptv](https://github.com/iptv-org/iptv) e listing link da siti pubblici.
+Serverless su Cloudflare Workers. Niente server locale per Stremio, niente VPN.
 
 Dominio: **streaming.mylabella.it**
 
@@ -40,12 +40,41 @@ const UTENTI = new Set([
 Per aggiungerne uno, inserisci il nome nella lista e fai deploy.
 Esempio: `https://streaming.mylabella.it/mario/manifest.json`.
 
+## Listing siti
+
+I listing siti sono generati localmente dal `site-listing-agent` e salvati in:
+
+```text
+data/site-listings.json
+```
+
+Routine:
+
+```bash
+/home/ai-brain/site-listing-agent/list_site_links.py \
+  --site-name example \
+  --url 'https://example.com'
+```
+
+Poi:
+
+```bash
+npm run lint
+git add data/site-listings.json
+git commit -m "Aggiunto listing sito example"
+git push
+```
+
+Dopo il deploy, i link compaiono nel catalogo Stremio `Streaming Mylabella — Siti`.
+
 ## Struttura
 
 ```text
 src/
 ├── index.ts        # Worker principale (router + endpoint Stremio)
 └── m3u.ts          # Parser M3U
+data/
+└── site-listings.json
 ```
 
 ## Endpoint
@@ -55,8 +84,10 @@ Tutti gli endpoint passano dal prefisso utente `/<utente>`.
 | Path | Descrizione |
 |---|---|
 | `/<utente>/manifest.json` | Manifest Stremio |
-| `/<utente>/catalog/tv/streaming-mylabella.json` | Catalog default: Italia, tutte le categorie |
-| `/<utente>/catalog/tv/streaming-mylabella/genre=Sport.json` | Canali per categoria |
-| `/<utente>/catalog/tv/streaming-mylabella/genre=Sport/paese=it.json` | Canali per categoria e paese |
-| `/<utente>/stream/tv/<id>.json` | Stream M3U8 diretto |
-| `/<utente>/meta/tv/<id>.json` | Metadati canale |
+| `/<utente>/catalog/tv/streaming-mylabella.json` | Catalog IPTV default: Italia, tutte le categorie |
+| `/<utente>/catalog/tv/streaming-mylabella/genre=Sport.json` | Canali IPTV per categoria |
+| `/<utente>/catalog/tv/streaming-mylabella/genre=Sport/paese=it.json` | Canali IPTV per categoria e paese |
+| `/<utente>/catalog/tv/streaming-mylabella-sites.json` | Tutti i link dai siti indicizzati |
+| `/<utente>/catalog/tv/streaming-mylabella-sites/sito=example.json` | Link del singolo sito |
+| `/<utente>/stream/tv/<id>.json` | Stream diretto o pagina esterna |
+| `/<utente>/meta/tv/<id>.json` | Metadati item |

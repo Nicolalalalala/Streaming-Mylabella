@@ -1,13 +1,16 @@
 /**
- * Streaming Mylabella — Addon Stremio per IPTV su Cloudflare Workers.
- * Serverless, multi-utente, filtri: Categoria → Paese.
+ * Streaming Mylabella — Addon Stremio per IPTV e listing siti su Cloudflare Workers.
+ * Serverless, multi-utente, filtri: Categoria → Paese + Siti.
  */
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
+import siteListings from "../data/site-listings.json";
 
 const ADDON_ID = "org.streaming-mylabella";
 const CATALOG_ID = "streaming-mylabella";
+const SITE_CATALOG_ID = "streaming-mylabella-sites";
 const ID_PREFIX = "mylabella-";
+const SITE_ID_PREFIX = "site-";
 
 const IPTV_API = "https://iptv-org.github.io/api";
 const M3U_BASE =
@@ -33,6 +36,31 @@ function rimuoviUtente(path: string, utente: string): string {
   if (path === prefix) return "/";
   return path.slice(prefix.length);
 }
+
+// ─── Tipi listing siti ─────────────────────────────────
+
+type SiteItem = {
+  title: string;
+  url: string;
+  kind: "stream" | "page" | "external";
+  source: string;
+};
+
+type SiteListing = {
+  name: string;
+  sourceUrl: string;
+  finalUrl?: string;
+  updatedAt: string;
+  counts: Record<string, number>;
+  items: SiteItem[];
+};
+
+type SiteListingFile = {
+  version: number;
+  sites: Record<string, SiteListing>;
+};
+
+const SITE_LISTINGS = siteListings as SiteListingFile;
 
 // ─── Cache categorie ───────────────────────────────────
 
@@ -121,6 +149,30 @@ function canaleToMeta(canale: Canale): Record<string, unknown> {
   };
 }
 
+function siteItemToMeta(siteName: string, item: SiteItem): Record<string, unknown> {
+  const id = SITE_ID_PREFIX + urlToId(item.url);
+  const badge = item.kind === "stream" ? "stream" : "page";
+  return {
+    id,
+    type: "tv",
+    name: `[${badge}] ${item.title}`,
+    poster: "https://img.icons8.com/color/96/link.png",
+    description: `${siteName} · ${item.kind} · ${item.url}`,
+    behaviorHints: { defaultVideoId: id },
+  };
+}
+
+function isDirectStreamUrl(value: string): boolean {
+  try {
+    const path = new URL(value).pathname.toLowerCase();
+    return [".m3u8", ".mp4", ".webm", ".mov", ".mkv", ".avi", ".mpd"].some((ext) =>
+      path.endsWith(ext)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function corsHeaders(): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": "*",
@@ -148,12 +200,15 @@ async function manifesto(): Promise<Response> {
   } catch { /* fallback */ }
 
   const opzioniCategoria = Object.values(NOMI_CATEGORIE);
+  const opzioniSito = Object.keys(SITE_LISTINGS.sites).sort((a, b) =>
+    a.localeCompare(b, "it")
+  );
 
   return jsonResponse({
     id: ADDON_ID,
     name: "Streaming Mylabella",
-    version: "2.0.0",
-    description: "Canali IPTV da iptv-org — Cloudflare Workers.",
+    version: "2.1.0",
+    description: "Canali IPTV da iptv-org e listing siti — Cloudflare Workers.",
     logo: "https://img.icons8.com/color/96/tv.png",
     resources: ["catalog", "stream", "meta"],
     types: ["tv"],
@@ -167,8 +222,16 @@ async function manifesto(): Promise<Response> {
           { name: "paese", options: opzioniPaese, isRequired: false },
         ],
       },
+      {
+        type: "tv",
+        id: SITE_CATALOG_ID,
+        name: "Streaming Mylabella — Siti",
+        extra: [
+          { name: "sito", options: opzioniSito, isRequired: false },
+        ],
+      },
     ],
-    idPrefixes: [ID_PREFIX],
+    idPrefixes: [ID_PREFIX, SITE_ID_PREFIX],
   });
 }
 
@@ -228,9 +291,40 @@ async function catalogo(
   return jsonResponse({ metas: canali.map(canaleToMeta) });
 }
 
+function catalogoSiti(sito: string | null): Response {
+  const entries = Object.entries(SITE_LISTINGS.sites).sort(([a], [b]) =>
+    a.localeCompare(b, "it")
+  );
+  const selected = sito ? entries.filter(([name]) => name === sito) : entries;
+  const metas = selected.flatMap(([siteName, listing]) =>
+    listing.items.map((item) => siteItemToMeta(siteName, item))
+  );
+  return jsonResponse({ metas });
+}
+
 // ─── Stream & Meta ────────────────────────────────────
 
 async function streamHandler(id: string): Promise<Response> {
+  if (id.startsWith(SITE_ID_PREFIX)) {
+    const raw = id.slice(SITE_ID_PREFIX.length);
+    let url: string;
+    try { url = idToUrl(raw); } catch {
+      return jsonResponse({ error: "ID sito non valido" }, 404);
+    }
+    if (isDirectStreamUrl(url)) {
+      return jsonResponse({
+        streams: [
+          { title: "Stream diretto", url, behaviorHints: { notWebReady: false } },
+        ],
+      });
+    }
+    return jsonResponse({
+      streams: [
+        { title: "Apri pagina esterna", externalUrl: url },
+      ],
+    });
+  }
+
   if (!id.startsWith(ID_PREFIX)) {
     return jsonResponse({ error: "ID non valido" }, 404);
   }
@@ -247,6 +341,17 @@ async function streamHandler(id: string): Promise<Response> {
 }
 
 async function metaHandler(id: string): Promise<Response> {
+  if (id.startsWith(SITE_ID_PREFIX)) {
+    const raw = id.slice(SITE_ID_PREFIX.length);
+    let url: string;
+    try { url = idToUrl(raw); } catch {
+      return jsonResponse({ error: "ID sito non valido" }, 404);
+    }
+    return jsonResponse({
+      meta: { id, type: "tv", name: "Link sito", description: url },
+    });
+  }
+
   if (!id.startsWith(ID_PREFIX)) {
     return jsonResponse({ error: "ID non valido" }, 404);
   }
@@ -287,6 +392,15 @@ export default {
     if (catalogMatch) {
       const extras = parseExtras(path);
       return catalogo(extras["genre"] || null, extras["paese"] || null);
+    }
+
+    // /catalog/tv/streaming-mylabella-sites(.json|/sito=X.json)
+    const siteCatalogMatch = path.match(
+      /^\/catalog\/tv\/streaming-mylabella-sites(\.json|\/sito=[^/\\.]+\.json)$/
+    );
+    if (siteCatalogMatch) {
+      const extras = parseExtras(path);
+      return catalogoSiti(extras["sito"] || null);
     }
 
     const streamMatch = path.match(/^\/stream\/tv\/(.+\.json)$/);
