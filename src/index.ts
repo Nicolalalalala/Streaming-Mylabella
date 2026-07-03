@@ -1,6 +1,6 @@
 /**
  * Streaming Mylabella — Addon Stremio per IPTV su Cloudflare Workers.
- * Serverless, multi-utente, filtri: Categoria → Paese.
+ * Serverless, pubblico, filtri: Categoria → Paese.
  */
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
@@ -14,23 +14,6 @@ const M3U_BASE =
   "https://raw.githubusercontent.com/iptv-org/iptv/master/streams";
 
 const DEFAULT_COUNTRY = "it";
-
-// ─── Token ─────────────────────────────────────────────
-
-const TOKENS = new Set([
-  "nicola",
-]);
-
-function estraiToken(path: string): string | null {
-  const match = path.match(/^\/([a-zA-Z0-9_-]+)(\/|$)/);
-  return match ? match[1] : null;
-}
-
-function rimuoviToken(path: string, token: string): string {
-  const prefix = "/" + token;
-  if (path === prefix) return "/";
-  return path.slice(prefix.length);
-}
 
 // ─── Cache categorie ───────────────────────────────────
 
@@ -267,16 +250,7 @@ export default {
     }
 
     const url = new URL(request.url);
-    const rawPath = url.pathname;
-
-    const token = estraiToken(rawPath);
-    if (!token || !TOKENS.has(token)) {
-      return jsonResponse(
-        { error: "Accesso negato. Token mancante o non valido." }, 403
-      );
-    }
-
-    const path = rimuoviToken(rawPath, token);
+    const path = url.pathname;
 
     if (path === "/manifest.json") return manifesto();
 
