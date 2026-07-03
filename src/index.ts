@@ -1,12 +1,13 @@
 /**
  * Streaming Mylabella — Addon Stremio per IPTV su Cloudflare Workers.
- * Serverless, multi-utente, con filtri per paese e categoria.
+ * Serverless, multi-utente, filtri: Categoria → Paese.
  */
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
 
-const ADDON_ID = "org.pezzotto";
-const CATALOG_ID = "pezzotto-paesi";
+const ADDON_ID = "org.streaming-mylabella";
+const CATALOG_ID = "streaming-mylabella";
+const ID_PREFIX = "mylabella-";
 
 const IPTV_API = "https://iptv-org.github.io/api";
 const M3U_BASE =
@@ -18,7 +19,6 @@ const DEFAULT_COUNTRY = "it";
 
 const TOKENS = new Set([
   "nicola",
-  // "amico1",
 ]);
 
 function estraiToken(path: string): string | null {
@@ -34,12 +34,12 @@ function rimuoviToken(path: string, token: string): string {
 
 // ─── Cache categorie ───────────────────────────────────
 
-type CategoriaMap = Map<string, string[]>; // tvg-id → categorie
+type CategoriaMap = Map<string, string[]>;
 
 let categoriaCache: CategoriaMap | null = null;
 let categoriaPromise: Promise<CategoriaMap> | null = null;
 
-/** Mappa i nomi categoria inglese → italiano per la UI Stremio. */
+/** Mappa nomi categoria inglese → italiano. */
 const NOMI_CATEGORIE: Record<string, string> = {
   news: "Notizie",
   sports: "Sport",
@@ -73,23 +73,23 @@ const NOMI_CATEGORIE: Record<string, string> = {
   xxx: "XXX",
 };
 
+/** Mappa inversa: nome italiano → chiave inglese. */
+const CAT_IT_TO_EN: Record<string, string> = {};
+for (const [en, it] of Object.entries(NOMI_CATEGORIE)) {
+  CAT_IT_TO_EN[it.toLowerCase()] = en;
+}
+
 async function caricaCategorie(): Promise<CategoriaMap> {
   if (categoriaCache) return categoriaCache;
-
   if (categoriaPromise) {
-    try {
-      return await categoriaPromise;
-    } catch {
-      // riprova
-    }
+    try { return await categoriaPromise; } catch { /* riprova */ }
   }
 
   categoriaPromise = (async () => {
     const resp = await fetch(`${IPTV_API}/channels.json`);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const canali = (await resp.json()) as Array<{
-      id: string;
-      categories: string[];
+      id: string; categories: string[];
     }>;
     const map: CategoriaMap = new Map();
     for (const c of canali) {
@@ -99,9 +99,7 @@ async function caricaCategorie(): Promise<CategoriaMap> {
     return map;
   })();
 
-  try {
-    return await categoriaPromise;
-  } catch {
+  try { return await categoriaPromise; } catch {
     categoriaPromise = null;
     return new Map();
   }
@@ -110,15 +108,12 @@ async function caricaCategorie(): Promise<CategoriaMap> {
 // ─── Helpers ──────────────────────────────────────────
 
 function canaleToMeta(canale: Canale): Record<string, unknown> {
-  const id = "pezzotto-" + urlToId(canale.url);
+  const id = ID_PREFIX + urlToId(canale.url);
   let nomeCompleto = canale.nome;
   if (canale.qualita) nomeCompleto += ` (${canale.qualita})`;
   if (canale.geoBlocked) nomeCompleto += " [Geo-blocked]";
-
   return {
-    id,
-    type: "tv",
-    name: nomeCompleto,
+    id, type: "tv", name: nomeCompleto,
     poster: "https://img.icons8.com/color/96/tv.png",
     description: canale.tvgId || "",
   };
@@ -164,35 +159,34 @@ async function manifesto(): Promise<Response> {
       {
         type: "tv",
         id: CATALOG_ID,
-        name: "Canali TV",
+        name: "Streaming Mylabella",
         extra: [
-          { name: "genre", options: opzioniPaese, isRequired: false },
-          { name: "category", options: opzioniCategoria, isRequired: false },
+          { name: "genre", options: opzioniCategoria, isRequired: false },
+          { name: "paese", options: opzioniPaese, isRequired: false },
         ],
       },
     ],
-    idPrefixes: ["pezzotto-"],
+    idPrefixes: [ID_PREFIX],
   });
 }
 
 // ─── Catalog ──────────────────────────────────────────
 
-/** Estrae i parametri extra dal path (es. genre=it, category=sports). */
 function parseExtras(path: string): Record<string, string> {
   const extras: Record<string, string> = {};
-  const re = /([a-z]+)=([a-zA-Z0-9_-]+)/g;
+  const re = /([a-z]+)=([^/\\.]+)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(path)) !== null) {
-    extras[m[1]] = m[2];
+    extras[m[1]] = decodeURIComponent(m[2]);
   }
   return extras;
 }
 
 async function catalogo(
-  genre: string | null,
-  category: string | null
+  categoria: string | null,
+  paese: string | null
 ): Promise<Response> {
-  const codice = genre || DEFAULT_COUNTRY;
+  const codice = paese || DEFAULT_COUNTRY;
   const m3uUrl = `${M3U_BASE}/${codice}.m3u`;
 
   let contenuto: string;
@@ -213,14 +207,11 @@ async function catalogo(
 
   let canali = parseM3U(contenuto);
 
-  // Filtra per categoria (se richiesta)
-  if (category && catMap.size > 0) {
-    // Accetta sia italiano che inglese
-    const catLower = category.toLowerCase();
-    let catKey = Object.entries(NOMI_CATEGORIE).find(
-      ([en, it]) => en === catLower || it.toLowerCase() === catLower
-    )?.[0];
-    if (!catKey) catKey = catLower;
+  // Filtra per categoria
+  if (categoria && catMap.size > 0) {
+    const catKey =
+      CAT_IT_TO_EN[categoria.toLowerCase()] ??  // "Sport" → "sports"
+      categoria.toLowerCase();                    // già in inglese
 
     canali = canali.filter((c) => {
       if (!c.tvgId) return false;
@@ -230,7 +221,6 @@ async function catalogo(
     });
   }
 
-  // Ordina alfabeticamente
   canali.sort((a, b) => a.nome.localeCompare(b.nome, "it"));
 
   return jsonResponse({ metas: canali.map(canaleToMeta) });
@@ -239,30 +229,26 @@ async function catalogo(
 // ─── Stream & Meta ────────────────────────────────────
 
 async function streamHandler(id: string): Promise<Response> {
-  if (!id.startsWith("pezzotto-")) {
+  if (!id.startsWith(ID_PREFIX)) {
     return jsonResponse({ error: "ID non valido" }, 404);
   }
-  const raw = id.slice("pezzotto-".length);
+  const raw = id.slice(ID_PREFIX.length);
   let url: string;
   try { url = idToUrl(raw); } catch {
     return jsonResponse({ error: "ID canale non valido" }, 404);
   }
   return jsonResponse({
     streams: [
-      {
-        title: "M3U8 (diretto)",
-        url,
-        behaviorHints: { notWebReady: false },
-      },
+      { title: "M3U8 (diretto)", url, behaviorHints: { notWebReady: false } },
     ],
   });
 }
 
 async function metaHandler(id: string): Promise<Response> {
-  if (!id.startsWith("pezzotto-")) {
+  if (!id.startsWith(ID_PREFIX)) {
     return jsonResponse({ error: "ID non valido" }, 404);
   }
-  const raw = id.slice("pezzotto-".length);
+  const raw = id.slice(ID_PREFIX.length);
   let url: string;
   try { url = idToUrl(raw); } catch {
     return jsonResponse({ error: "ID canale non valido" }, 404);
@@ -283,40 +269,31 @@ export default {
     const url = new URL(request.url);
     const rawPath = url.pathname;
 
-    // Auth
     const token = estraiToken(rawPath);
     if (!token || !TOKENS.has(token)) {
       return jsonResponse(
-        { error: "Accesso negato. Token mancante o non valido." },
-        403
+        { error: "Accesso negato. Token mancante o non valido." }, 403
       );
     }
 
     const path = rimuoviToken(rawPath, token);
 
-    // GET /manifest.json
-    if (path === "/manifest.json") {
-      return manifesto();
-    }
+    if (path === "/manifest.json") return manifesto();
 
-    // GET /catalog/tv/pezzotto-paesi(.json|/genre=XX.json|/category=YY.json|/genre=XX/category=YY.json)
+    // /catalog/tv/streaming-mylabella(.json|/genre=X.json|/genre=X/paese=YY.json|...)
     const catalogMatch = path.match(
-      /^\/catalog\/tv\/pezzotto-paesi(\.json|\/(?:genre=[a-z]{2}|category=[a-zA-Z0-9_-]+)(?:\/(?:genre=[a-z]{2}|category=[a-zA-Z0-9_-]+))?\.json)$/
+      /^\/catalog\/tv\/streaming-mylabella(\.json|\/(?:genre=[^/]+|paese=[a-z]{2})(?:\/(?:genre=[^/]+|paese=[a-z]{2}))?\.json)$/
     );
     if (catalogMatch) {
       const extras = parseExtras(path);
-      const genre = extras["genre"] || null;
-      const category = extras["category"] || null;
-      return catalogo(genre, category);
+      return catalogo(extras["genre"] || null, extras["paese"] || null);
     }
 
-    // GET /stream/tv/{id}.json
     const streamMatch = path.match(/^\/stream\/tv\/(.+\.json)$/);
     if (streamMatch) {
       return streamHandler(streamMatch[1].replace(/\.json$/, ""));
     }
 
-    // GET /meta/tv/{id}.json
     const metaMatch = path.match(/^\/meta\/tv\/(.+\.json)$/);
     if (metaMatch) {
       return metaHandler(metaMatch[1].replace(/\.json$/, ""));
