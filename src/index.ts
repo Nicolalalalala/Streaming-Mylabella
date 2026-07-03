@@ -150,7 +150,7 @@ async function manifesto(): Promise<Response> {
     }
   } catch { /* fallback */ }
 
-  const opzioniCategoria = Object.keys(NOMI_CATEGORIE);
+  const opzioniCategoria = Object.values(NOMI_CATEGORIE);
 
   return jsonResponse({
     id: ADDON_ID,
@@ -215,10 +215,12 @@ async function catalogo(
 
   // Filtra per categoria (se richiesta)
   if (category && catMap.size > 0) {
-    const catKey =
-      Object.entries(NOMI_CATEGORIE).find(
-        ([, it]) => it.toLowerCase() === category.toLowerCase()
-      )?.[0] ?? category;
+    // Accetta sia italiano che inglese
+    const catLower = category.toLowerCase();
+    let catKey = Object.entries(NOMI_CATEGORIE).find(
+      ([en, it]) => en === catLower || it.toLowerCase() === catLower
+    )?.[0];
+    if (!catKey) catKey = catLower;
 
     canali = canali.filter((c) => {
       if (!c.tvgId) return false;
