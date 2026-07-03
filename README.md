@@ -40,6 +40,26 @@ const UTENTI = new Set([
 Per aggiungerne uno, inserisci il nome nella lista e fai deploy.
 Esempio: `https://streaming.mylabella.it/mario/manifest.json`.
 
+## Verifica e filtro canali IPTV
+
+I canali rotti verificati vengono filtrati da:
+
+```text
+data/blocked-streams.json
+```
+
+Per rigenerare il report Italia:
+
+```bash
+python3 scripts/verify_iptv_streams.py \
+  --country it \
+  --timeout 8 \
+  --workers 32 \
+  --output /home/ai-brain/site-listing-agent/logs/iptv-it-verify.json
+```
+
+La blacklist va aggiornata solo dopo verifica reale degli stream. Niente tagli sulla fiducia: già basta IPTV-org a fare archeologia digitale.
+
 ## Listing siti
 
 I listing siti sono generati localmente dal `site-listing-agent` e salvati in:

@@ -5,6 +5,7 @@
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
 import siteListings from "../data/site-listings.json";
+import blockedStreams from "../data/blocked-streams.json";
 
 const ADDON_ID = "org.streaming-mylabella";
 const CATALOG_ID = "streaming-mylabella";
@@ -60,7 +61,13 @@ type SiteListingFile = {
   sites: Record<string, SiteListing>;
 };
 
+type BlockedStreamsFile = {
+  version: number;
+  blockedUrls: string[];
+};
+
 const SITE_LISTINGS = siteListings as SiteListingFile;
+const BLOCKED_STREAMS = new Set((blockedStreams as BlockedStreamsFile).blockedUrls);
 
 // ─── Cache categorie ───────────────────────────────────
 
@@ -271,6 +278,7 @@ async function catalogo(
   }
 
   let canali = parseM3U(contenuto);
+  canali = canali.filter((c) => !BLOCKED_STREAMS.has(c.url));
 
   // Filtra per categoria
   if (categoria && catMap.size > 0) {
