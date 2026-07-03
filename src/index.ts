@@ -1,6 +1,6 @@
 /**
  * Streaming Mylabella — Addon Stremio per IPTV su Cloudflare Workers.
- * Serverless, pubblico, filtri: Categoria → Paese.
+ * Serverless, multi-utente, filtri: Categoria → Paese.
  */
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
@@ -14,6 +14,25 @@ const M3U_BASE =
   "https://raw.githubusercontent.com/iptv-org/iptv/master/streams";
 
 const DEFAULT_COUNTRY = "it";
+
+// ─── Utenti ────────────────────────────────────────────
+// Aggiungere nomi qui. Poi ridistribuire con `npx wrangler deploy`.
+// URL Stremio: https://streaming.mylabella.it/<utente>/manifest.json
+
+const UTENTI = new Set([
+  "nicola",
+]);
+
+function estraiUtente(path: string): string | null {
+  const match = path.match(/^\/([a-zA-Z0-9_-]+)(\/|$)/);
+  return match ? match[1] : null;
+}
+
+function rimuoviUtente(path: string, utente: string): string {
+  const prefix = "/" + utente;
+  if (path === prefix) return "/";
+  return path.slice(prefix.length);
+}
 
 // ─── Cache categorie ───────────────────────────────────
 
@@ -250,7 +269,14 @@ export default {
     }
 
     const url = new URL(request.url);
-    const path = url.pathname;
+    const rawPath = url.pathname;
+
+    const utente = estraiUtente(rawPath);
+    if (!utente || !UTENTI.has(utente)) {
+      return jsonResponse({ error: "Utente non riconosciuto." }, 403);
+    }
+
+    const path = rimuoviUtente(rawPath, utente);
 
     if (path === "/manifest.json") return manifesto();
 
