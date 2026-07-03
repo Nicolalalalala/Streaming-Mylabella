@@ -1,0 +1,10 @@
+# Pezzotto Worker — Cloudflare Worker
+name = "pezzotto-worker"
+main = "src/index.ts"
+compatibility_date = "2025-04-04"
+
+# Rotta personalizzata (opzionale, cambia con un dominio tuo)
+# route = "pezzotto.tuodominio.it/*"
+
+[observability]
+enabled = true
