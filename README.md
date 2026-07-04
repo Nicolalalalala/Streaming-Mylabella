@@ -1,6 +1,6 @@
 # Streaming Mylabella — Cloudflare Workers
 
-Addon Stremio per canali IPTV italiani da [iptv-org/iptv](https://github.com/iptv-org/iptv) e listing link da siti pubblici.
+Addon Stremio per canali IPTV italiani da [iptv-org/iptv](https://github.com/iptv-org/iptv), dataset pubblico [famelack-data](https://github.com/famelack/famelack-data) e listing link da siti pubblici.
 Serverless su Cloudflare Workers. Niente server locale per Stremio, niente VPN.
 
 Dominio: **streaming.mylabella.it**
@@ -54,7 +54,7 @@ Esempio: `https://streaming.mylabella.it/mario/manifest.json`.
 
 ## Verifica e filtro canali IPTV
 
-Il catalogo IPTV usa solo `streams/it.m3u`. Non espone il filtro paese nel manifest; eventuali vecchi URL con paesi diversi da `it` rispondono con `Non disponibile in Italia - Try Finger But Hole`.
+Il catalogo IPTV combina `streams/it.m3u` di iptv-org con il dataset pubblico `famelack-data` per l'Italia. I duplicati vengono accorpati per nome canale e ordinati con uno scoring semplice: Italia/italiano, non geoblocked, HTTPS, HLS, qualità dichiarata e metadati iptv-org quando disponibili. Non espone il filtro paese nel manifest; eventuali vecchi URL con paesi diversi da `it` rispondono con `Non disponibile in Italia - Try Finger But Hole`.
 
 Il catalogo `Streaming Mylabella — Consigliati` mostra, in ordine, i canali principali da Rai 1 a NOVE quando esiste uno stream non blacklistato:
 

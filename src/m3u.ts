@@ -9,6 +9,9 @@ export interface Canale {
   qualita?: string;   // es. "720p", "1080p"
   geoBlocked: boolean;
   flags: string[];     // es. ["Not 24/7"]
+  fonte?: "iptv-org" | "famelack";
+  languages?: string[];
+  country?: string;
 }
 
 /**
