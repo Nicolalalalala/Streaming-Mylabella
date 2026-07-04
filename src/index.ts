@@ -17,6 +17,8 @@ const SITE_ID_PREFIX = "site-";
 const IPTV_API = "https://iptv-org.github.io/api";
 const M3U_BASE =
   "https://raw.githubusercontent.com/iptv-org/iptv/master/streams";
+const FAMELACK_IT_URL =
+  "https://raw.githubusercontent.com/famelack/famelack-data/main/tv/raw/countries/it.json";
 const DEFAULT_TV_POSTER = "https://img.icons8.com/color/96/tv.png";
 const DEFAULT_SITE_POSTER = "https://img.icons8.com/color/96/link.png";
 
@@ -88,6 +90,15 @@ type SiteListingFile = {
 type BlockedStreamsFile = {
   version: number;
   blockedUrls: string[];
+};
+
+type FamelackChannel = {
+  nanoid?: string;
+  name: string;
+  sources?: { streams?: string[] };
+  languages?: string[];
+  country?: string;
+  isGeoBlocked?: boolean;
 };
 
 const SITE_LISTINGS = siteListings as SiteListingFile;
@@ -222,6 +233,10 @@ function logoCanale(canale: Canale, loghi: LogoMap): string {
   return (tvgId && loghi.get(tvgId)) || DEFAULT_TV_POSTER;
 }
 
+function fonteLabel(canale: Canale): string {
+  return canale.fonte === "famelack" ? "Famelack" : "iptv-org";
+}
+
 function faviconDaUrl(value: string): string {
   try {
     const host = new URL(value).hostname;
@@ -242,7 +257,7 @@ function canaleToMeta(canale: Canale, loghi: LogoMap): Record<string, unknown> {
     id, type: "tv", name: nomeCompleto,
     poster,
     logo: poster,
-    description: canale.tvgId || "",
+    description: [canale.tvgId, fonteLabel(canale)].filter(Boolean).join(" · "),
   };
 }
 
@@ -286,6 +301,99 @@ function jsonResponse(data: unknown, status = 200): Response {
   });
 }
 
+async function caricaCanaliIptvOrg(): Promise<Canale[]> {
+  const m3uUrl = `${M3U_BASE}/${DEFAULT_COUNTRY}.m3u`;
+  const m3uResp = await fetch(m3uUrl);
+  if (!m3uResp.ok) throw new Error(`Catalogo Italia non trovato: HTTP ${m3uResp.status}`);
+  const contenuto = await m3uResp.text();
+  return parseM3U(contenuto)
+    .filter((c) => !BLOCKED_STREAMS.has(c.url))
+    .map((c) => ({ ...c, fonte: "iptv-org" as const, country: "it" }));
+}
+
+async function caricaCanaliFamelack(): Promise<Canale[]> {
+  const resp = await fetch(FAMELACK_IT_URL);
+  if (!resp.ok) throw new Error(`Famelack Italia non trovato: HTTP ${resp.status}`);
+  const payload = (await resp.json()) as FamelackChannel[];
+  const canali: Canale[] = [];
+  for (const item of payload) {
+    const streams = item.sources?.streams ?? [];
+    for (const streamUrl of streams) {
+      if (!streamUrl || BLOCKED_STREAMS.has(streamUrl)) continue;
+      canali.push({
+        nome: item.name,
+        url: streamUrl,
+        tvgId: item.nanoid ? `famelack:${item.nanoid}` : undefined,
+        geoBlocked: Boolean(item.isGeoBlocked),
+        flags: item.isGeoBlocked ? ["Geo-blocked"] : [],
+        fonte: "famelack",
+        languages: item.languages ?? [],
+        country: item.country,
+      });
+    }
+  }
+  return canali;
+}
+
+function normalizzaNomeCanale(nome: string): string {
+  return nome
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\b(hd|fhd|uhd|4k|sd)\b/g, "")
+    .replace(/[^a-z0-9]+/g, "")
+    .trim();
+}
+
+function qualityScore(qualita?: string): number {
+  if (!qualita) return 0;
+  const match = qualita.match(/(\d+)p/);
+  return match ? Math.min(Number(match[1]) / 10, 120) : 0;
+}
+
+function scoreCanale(canale: Canale): number {
+  let score = 0;
+  if ((canale.country ?? "it").toLowerCase() === "it") score += 30;
+  if (canale.languages?.includes("ita")) score += 25;
+  if (!canale.geoBlocked) score += 15;
+  if (canale.url.startsWith("https://")) score += 10;
+  if (canale.url.toLowerCase().includes(".m3u8")) score += 10;
+  score += qualityScore(canale.qualita);
+  // iptv-org porta metadati/loghi/categorie migliori; Famelack allarga la copertura.
+  if (canale.fonte === "iptv-org") score += 5;
+  return score;
+}
+
+function scegliMiglioriCanali(canali: Canale[]): Canale[] {
+  const byName = new Map<string, Canale>();
+  for (const canale of canali) {
+    const key = normalizzaNomeCanale(canale.nome);
+    if (!key) continue;
+    const current = byName.get(key);
+    if (!current || scoreCanale(canale) > scoreCanale(current)) {
+      byName.set(key, canale);
+    }
+  }
+  return [...byName.values()].sort((a, b) => a.nome.localeCompare(b.nome, "it"));
+}
+
+async function caricaCanaliItaliani(): Promise<Canale[]> {
+  const [iptvResult, famelackResult] = await Promise.allSettled([
+    caricaCanaliIptvOrg(),
+    caricaCanaliFamelack(),
+  ]);
+  const canali: Canale[] = [];
+  if (iptvResult.status === "fulfilled") canali.push(...iptvResult.value);
+  if (famelackResult.status === "fulfilled") canali.push(...famelackResult.value);
+  if (!canali.length) {
+    const errors = [iptvResult, famelackResult]
+      .filter((r): r is PromiseRejectedResult => r.status === "rejected")
+      .map((r) => String(r.reason));
+    throw new Error(errors.join("; ") || "Nessun canale italiano disponibile");
+  }
+  return scegliMiglioriCanali(canali);
+}
+
 // ─── Manifest ─────────────────────────────────────────
 
 async function manifesto(): Promise<Response> {
@@ -297,8 +405,8 @@ async function manifesto(): Promise<Response> {
   return jsonResponse({
     id: ADDON_ID,
     name: "Streaming Mylabella",
-    version: "2.1.0",
-    description: "Canali IPTV da iptv-org e listing siti — Cloudflare Workers.",
+    version: "2.2.0",
+    description: "Canali IPTV da iptv-org + Famelack e listing siti — Cloudflare Workers.",
     logo: DEFAULT_TV_POSTER,
     resources: ["catalog", "stream", "meta"],
     types: ["tv"],
@@ -344,31 +452,21 @@ function parseExtras(path: string): Record<string, string> {
 async function catalogo(
   categoria: string | null
 ): Promise<Response> {
-  const m3uUrl = `${M3U_BASE}/${DEFAULT_COUNTRY}.m3u`;
-
-  let contenuto: string;
+  let canali: Canale[];
   let catMap: CategoriaMap;
   let loghi: LogoMap;
   try {
-    const [m3uResp, catMapCaricata, loghiCaricati] = await Promise.all([
-      fetch(m3uUrl),
+    [canali, catMap, loghi] = await Promise.all([
+      caricaCanaliItaliani(),
       caricaCategorie(),
       caricaLoghi(),
     ]);
-    if (!m3uResp.ok) {
-      return jsonResponse({ error: "Catalogo Italia non trovato" }, 404);
-    }
-    contenuto = await m3uResp.text();
-    catMap = catMapCaricata;
-    loghi = loghiCaricati;
   } catch (e) {
     return jsonResponse({ error: `Errore: ${e}` }, 502);
   }
 
-  let canali = parseM3U(contenuto);
-  canali = canali.filter((c) => !BLOCKED_STREAMS.has(c.url));
-
-  // Filtra per categoria
+  // Filtra per categoria. Famelack non espone categorie: resta nel catalogo
+  // principale e nei consigliati, mentre i cataloghi di categoria usano iptv-org.
   if (categoria && catMap.size > 0) {
     const catKey =
       CAT_IT_TO_EN[categoria.toLowerCase()] ??  // "Sport" → "sports"
@@ -382,34 +480,24 @@ async function catalogo(
     });
   }
 
-  canali.sort((a, b) => a.nome.localeCompare(b.nome, "it"));
-
   return jsonResponse({ metas: canali.map((canale) => canaleToMeta(canale, loghi)) });
 }
 
 async function catalogoConsigliati(): Promise<Response> {
-  const m3uUrl = `${M3U_BASE}/${DEFAULT_COUNTRY}.m3u`;
-
-  let contenuto: string;
+  let canali: Canale[];
   let loghi: LogoMap;
   try {
-    const [m3uResp, loghiCaricati] = await Promise.all([
-      fetch(m3uUrl),
+    [canali, loghi] = await Promise.all([
+      caricaCanaliItaliani(),
       caricaLoghi(),
     ]);
-    if (!m3uResp.ok) {
-      return jsonResponse({ error: "Catalogo Italia non trovato" }, 404);
-    }
-    contenuto = await m3uResp.text();
-    loghi = loghiCaricati;
   } catch (e) {
     return jsonResponse({ error: `Errore: ${e}` }, 502);
   }
 
-  const canali = parseM3U(contenuto).filter((c) => !BLOCKED_STREAMS.has(c.url));
   const canaliPerNome = new Map<string, Canale[]>();
   for (const canale of canali) {
-    const key = canale.nome.toLowerCase();
+    const key = normalizzaNomeCanale(canale.nome);
     const gruppo = canaliPerNome.get(key) ?? [];
     gruppo.push(canale);
     canaliPerNome.set(key, gruppo);
@@ -419,8 +507,9 @@ async function catalogoConsigliati(): Promise<Response> {
   const urlsUsati = new Set<string>();
   for (const voce of CANALI_CONSIGLIATI) {
     const candidato = voce.aliases
-      .flatMap((alias) => canaliPerNome.get(alias.toLowerCase()) ?? [])
-      .find((canale) => !urlsUsati.has(canale.url));
+      .flatMap((alias) => canaliPerNome.get(normalizzaNomeCanale(alias)) ?? [])
+      .filter((canale) => !urlsUsati.has(canale.url))
+      .sort((a, b) => scoreCanale(b) - scoreCanale(a))[0];
     if (!candidato) continue;
     urlsUsati.add(candidato.url);
     consigliati.push({ ...candidato, nome: voce.name });

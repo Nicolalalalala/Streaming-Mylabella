@@ -38,10 +38,15 @@ MEDIA_EXTENSIONS = (
     ".mpd",
 )
 RAW_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
-# Do not reject Italian AGCOM/ISP notice redirects here.
-# The lister runs from ai-brain in Italy, but viewers may be abroad; local
-# censorship/notice results must not become a global blacklist. Keep the
-# extraction content-blind and let runtime availability decide.
+BLOCK_NOTICE_HOSTS = {
+    "block.gov.it",
+}
+BLOCK_NOTICE_MARKERS = (
+    "Open Fiber - warning",
+    "Accesso al sito inibito",
+    "agcom_piracy_shield",
+    "Piracy Shield",
+)
 
 
 @dataclass
@@ -148,9 +153,19 @@ def blocked_reason(url: str | None) -> str | None:
     if not url:
         return None
     try:
-        urllib.parse.urlsplit(url)
+        parsed = urllib.parse.urlsplit(url)
     except Exception:
         return "invalid_url"
+    if parsed.hostname and parsed.hostname.lower() in BLOCK_NOTICE_HOSTS:
+        return "block_notice"
+    return None
+
+
+def html_block_reason(html: str) -> str | None:
+    sample = html[:50000]
+    for marker in BLOCK_NOTICE_MARKERS:
+        if marker.lower() in sample.lower():
+            return "block_notice"
     return None
 
 
@@ -326,7 +341,7 @@ def main() -> int:
     try:
         html, fetch_meta = fetch_html(args.url, timeout=args.timeout)
         summary["warnings"].extend(fetch_meta.get("warnings", []))
-        final_reason = blocked_reason(fetch_meta.get("final_url"))
+        final_reason = blocked_reason(fetch_meta.get("final_url")) or html_block_reason(html)
         extracted_items = extract_links(html, fetch_meta.get("final_url") or args.url, max_links=args.max_links)
         if final_reason:
             items = []
