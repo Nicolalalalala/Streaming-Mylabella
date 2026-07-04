@@ -61,11 +61,15 @@ export function parseM3U(contenuto: string): Canale[] {
     if (virgolaIdx === -1) continue;
     const nomeRaw = riga.slice(virgolaIdx + 1).trim();
 
-    // Prossima riga = URL
+    // Prossima riga non-commento = URL. Alcuni stream hanno direttive VLC
+    // tipo #EXTVLCOPT prima dell'URL vero: saltarle, non droppare il canale.
     i++;
+    while (i < righe.length && (!righe[i].trim() || righe[i].trim().startsWith("#"))) {
+      i++;
+    }
     if (i >= righe.length) break;
     const url = righe[i].trim();
-    if (!url || url.startsWith("#")) continue;
+    if (!url) continue;
 
     const { nomePulito: nomeSenzaFlags, flags } = estraiFlags(nomeRaw);
     const { nomePulito, qualita } = estraiQualita(nomeSenzaFlags);

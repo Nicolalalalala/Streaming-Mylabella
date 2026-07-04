@@ -38,18 +38,10 @@ MEDIA_EXTENSIONS = (
     ".mpd",
 )
 RAW_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
-BLOCKED_HOSTS = {
-    "block.gov.it",
-    "www.agcom.it",
-    "agcom.it",
-    "www.adm.gov.it",
-    "adm.gov.it",
-    "www.commissariatodips.it",
-    "commissariatodips.it",
-    "eur-lex.europa.eu",
-    "www.normattiva.it",
-    "normattiva.it",
-}
+# Do not reject Italian AGCOM/ISP notice redirects here.
+# The lister runs from ai-brain in Italy, but viewers may be abroad; local
+# censorship/notice results must not become a global blacklist. Keep the
+# extraction content-blind and let runtime availability decide.
 
 
 @dataclass
@@ -156,11 +148,9 @@ def blocked_reason(url: str | None) -> str | None:
     if not url:
         return None
     try:
-        host = urllib.parse.urlsplit(url).netloc.lower().split(":", 1)[0]
+        urllib.parse.urlsplit(url)
     except Exception:
         return "invalid_url"
-    if host in BLOCKED_HOSTS:
-        return "blocked_or_notice_host"
     return None
 
 
@@ -187,7 +177,7 @@ def probe_link(item: ExtractedLink, timeout: int) -> tuple[bool, str | None]:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             final_reason = blocked_reason(resp.geturl())
             if final_reason:
-                return False, "redirected_to_blocked_or_notice_host"
+                return False, f"redirected_to_{final_reason}"
             status = getattr(resp, "status", None)
             if status is not None and not (200 <= status < 400):
                 return False, f"http_{status}"
@@ -340,14 +330,14 @@ def main() -> int:
         extracted_items = extract_links(html, fetch_meta.get("final_url") or args.url, max_links=args.max_links)
         if final_reason:
             items = []
-            rejected_counts = {"source_redirected_to_blocked_or_notice_host": len(extracted_items)}
+            rejected_counts = {f"source_{final_reason}": len(extracted_items)}
             rejected_sample = [
-                {"title": item.title, "url": item.url, "reason": "source_redirected_to_blocked_or_notice_host"}
+                {"title": item.title, "url": item.url, "reason": f"source_{final_reason}"}
                 for item in extracted_items[:20]
             ]
         elif args.no_probe:
             items = [item for item in extracted_items if not blocked_reason(item.url)]
-            rejected_counts = {"blocked_or_notice_host": len(extracted_items) - len(items)} if len(items) != len(extracted_items) else {}
+            rejected_counts = {"invalid_url": len(extracted_items) - len(items)} if len(items) != len(extracted_items) else {}
             rejected_sample = []
         else:
             items, rejected_counts, rejected_sample = filter_working_links(

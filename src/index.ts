@@ -1,6 +1,6 @@
 /**
  * Streaming Mylabella — Addon Stremio per IPTV e listing siti su Cloudflare Workers.
- * Serverless, multi-utente, filtri: Categoria → Paese + Siti.
+ * Serverless, multi-utente, filtri: Consigliati + Categoria + Siti.
  */
 
 import { parseM3U, urlToId, idToUrl, type Canale } from "./m3u";
@@ -8,6 +8,7 @@ import siteListings from "../data/site-listings.json";
 import blockedStreams from "../data/blocked-streams.json";
 
 const ADDON_ID = "org.streaming-mylabella";
+const RECOMMENDED_CATALOG_ID = "streaming-mylabella-consigliati";
 const CATALOG_ID = "streaming-mylabella";
 const SITE_CATALOG_ID = "streaming-mylabella-sites";
 const ID_PREFIX = "mylabella-";
@@ -20,6 +21,19 @@ const DEFAULT_TV_POSTER = "https://img.icons8.com/color/96/tv.png";
 const DEFAULT_SITE_POSTER = "https://img.icons8.com/color/96/link.png";
 
 const DEFAULT_COUNTRY = "it";
+const NON_ITALY_MESSAGE = "Non disponibile in Italia - Try Finger But Hole";
+
+const CANALI_CONSIGLIATI: Array<{ name: string; aliases: string[] }> = [
+  { name: "Rai 1", aliases: ["Rai 1", "Rai 1 HD", "Rai 1 (Geo)"] },
+  { name: "Rai 2", aliases: ["Rai 2", "Rai 2 HD"] },
+  { name: "Rai 3", aliases: ["Rai 3", "Rai 3 HD"] },
+  { name: "Rete 4", aliases: ["Rete 4"] },
+  { name: "Canale 5", aliases: ["Canale 5"] },
+  { name: "Italia 1", aliases: ["Italia 1"] },
+  { name: "LA7", aliases: ["LA7", "La7"] },
+  { name: "TV8", aliases: ["TV8"] },
+  { name: "NOVE", aliases: ["NOVE", "Nove"] },
+];
 
 // ─── Utenti ────────────────────────────────────────────
 // Aggiungere nomi qui. Poi ridistribuire con `npx wrangler deploy`.
@@ -275,15 +289,6 @@ function jsonResponse(data: unknown, status = 200): Response {
 // ─── Manifest ─────────────────────────────────────────
 
 async function manifesto(): Promise<Response> {
-  let opzioniPaese: string[] = ["it", "us", "gb", "fr", "de", "es"];
-  try {
-    const resp = await fetch(`${IPTV_API}/countries.json`);
-    if (resp.ok) {
-      const paesi = (await resp.json()) as Array<{ code: string }>;
-      opzioniPaese = paesi.map((p) => p.code.toLowerCase());
-    }
-  } catch { /* fallback */ }
-
   const opzioniCategoria = Object.values(NOMI_CATEGORIE);
   const opzioniSito = Object.keys(SITE_LISTINGS.sites).sort((a, b) =>
     a.localeCompare(b, "it")
@@ -300,11 +305,15 @@ async function manifesto(): Promise<Response> {
     catalogs: [
       {
         type: "tv",
+        id: RECOMMENDED_CATALOG_ID,
+        name: "Streaming Mylabella — Consigliati",
+      },
+      {
+        type: "tv",
         id: CATALOG_ID,
-        name: "Streaming Mylabella",
+        name: "Streaming Mylabella — Italiani",
         extra: [
           { name: "genre", options: opzioniCategoria, isRequired: false },
-          { name: "paese", options: opzioniPaese, isRequired: false },
         ],
       },
       {
@@ -333,11 +342,9 @@ function parseExtras(path: string): Record<string, string> {
 }
 
 async function catalogo(
-  categoria: string | null,
-  paese: string | null
+  categoria: string | null
 ): Promise<Response> {
-  const codice = paese || DEFAULT_COUNTRY;
-  const m3uUrl = `${M3U_BASE}/${codice}.m3u`;
+  const m3uUrl = `${M3U_BASE}/${DEFAULT_COUNTRY}.m3u`;
 
   let contenuto: string;
   let catMap: CategoriaMap;
@@ -349,7 +356,7 @@ async function catalogo(
       caricaLoghi(),
     ]);
     if (!m3uResp.ok) {
-      return jsonResponse({ error: `Paese '${codice}' non trovato` }, 404);
+      return jsonResponse({ error: "Catalogo Italia non trovato" }, 404);
     }
     contenuto = await m3uResp.text();
     catMap = catMapCaricata;
@@ -378,6 +385,48 @@ async function catalogo(
   canali.sort((a, b) => a.nome.localeCompare(b.nome, "it"));
 
   return jsonResponse({ metas: canali.map((canale) => canaleToMeta(canale, loghi)) });
+}
+
+async function catalogoConsigliati(): Promise<Response> {
+  const m3uUrl = `${M3U_BASE}/${DEFAULT_COUNTRY}.m3u`;
+
+  let contenuto: string;
+  let loghi: LogoMap;
+  try {
+    const [m3uResp, loghiCaricati] = await Promise.all([
+      fetch(m3uUrl),
+      caricaLoghi(),
+    ]);
+    if (!m3uResp.ok) {
+      return jsonResponse({ error: "Catalogo Italia non trovato" }, 404);
+    }
+    contenuto = await m3uResp.text();
+    loghi = loghiCaricati;
+  } catch (e) {
+    return jsonResponse({ error: `Errore: ${e}` }, 502);
+  }
+
+  const canali = parseM3U(contenuto).filter((c) => !BLOCKED_STREAMS.has(c.url));
+  const canaliPerNome = new Map<string, Canale[]>();
+  for (const canale of canali) {
+    const key = canale.nome.toLowerCase();
+    const gruppo = canaliPerNome.get(key) ?? [];
+    gruppo.push(canale);
+    canaliPerNome.set(key, gruppo);
+  }
+
+  const consigliati: Canale[] = [];
+  const urlsUsati = new Set<string>();
+  for (const voce of CANALI_CONSIGLIATI) {
+    const candidato = voce.aliases
+      .flatMap((alias) => canaliPerNome.get(alias.toLowerCase()) ?? [])
+      .find((canale) => !urlsUsati.has(canale.url));
+    if (!candidato) continue;
+    urlsUsati.add(candidato.url);
+    consigliati.push({ ...candidato, nome: voce.name });
+  }
+
+  return jsonResponse({ metas: consigliati.map((canale) => canaleToMeta(canale, loghi)) });
 }
 
 function catalogoSiti(sito: string | null): Response {
@@ -475,13 +524,26 @@ export default {
 
     if (path === "/manifest.json") return manifesto();
 
-    // /catalog/tv/streaming-mylabella(.json|/genre=X.json|/genre=X/paese=YY.json|...)
+    // /catalog/tv/streaming-mylabella-consigliati.json
+    if (path === `/catalog/tv/${RECOMMENDED_CATALOG_ID}.json`) {
+      return catalogoConsigliati();
+    }
+
+    // /catalog/tv/streaming-mylabella(.json|/genre=X.json)
+    // Compat legacy: se Stremio ha in cache /paese=it.json, lo accettiamo ma ignoriamo il paese.
     const catalogMatch = path.match(
-      /^\/catalog\/tv\/streaming-mylabella(\.json|\/(?:genre=[^/]+|paese=[a-z]{2})(?:\/(?:genre=[^/]+|paese=[a-z]{2}))?\.json)$/
+      /^\/catalog\/tv\/streaming-mylabella(\.json|\/(?:genre=[^/]+|paese=it)(?:\/(?:genre=[^/]+|paese=it))?\.json)$/
     );
     if (catalogMatch) {
       const extras = parseExtras(path);
-      return catalogo(extras["genre"] || null, extras["paese"] || null);
+      return catalogo(extras["genre"] || null);
+    }
+
+    const unsupportedCountryCatalogMatch = path.match(
+      /^\/catalog\/tv\/streaming-mylabella\/(?:.*\/)?paese=(?!it)[a-z]{2}\.json$/
+    );
+    if (unsupportedCountryCatalogMatch) {
+      return jsonResponse({ error: NON_ITALY_MESSAGE }, 404);
     }
 
     // /catalog/tv/streaming-mylabella-sites(.json|/sito=X.json)
