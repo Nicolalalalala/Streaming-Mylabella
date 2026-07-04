@@ -33,7 +33,15 @@ Gli utenti abilitati sono definiti in `src/index.ts`:
 
 ```ts
 const UTENTI = new Set([
+  "simonefratello",
+  "simonemongelli",
+  "gioele",
+  "sergio",
+  "alardi",
+  "antonino",
+  "alex",
   "nicola",
+  "casa",
 ]);
 ```
 

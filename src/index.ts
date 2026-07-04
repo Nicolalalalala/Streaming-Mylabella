@@ -24,7 +24,15 @@ const DEFAULT_COUNTRY = "it";
 // URL Stremio: https://streaming.mylabella.it/<utente>/manifest.json
 
 const UTENTI = new Set([
+  "simonefratello",
+  "simonemongelli",
+  "gioele",
+  "sergio",
+  "alardi",
+  "antonino",
+  "alex",
   "nicola",
+  "casa",
 ]);
 
 function estraiUtente(path: string): string | null {

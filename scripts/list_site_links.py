@@ -10,8 +10,10 @@ URL path, or filename only.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures as cf
 import json
 import re
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -36,6 +38,18 @@ MEDIA_EXTENSIONS = (
     ".mpd",
 )
 RAW_URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
+BLOCKED_HOSTS = {
+    "block.gov.it",
+    "www.agcom.it",
+    "agcom.it",
+    "www.adm.gov.it",
+    "adm.gov.it",
+    "www.commissariatodips.it",
+    "commissariatodips.it",
+    "eur-lex.europa.eu",
+    "www.normattiva.it",
+    "normattiva.it",
+}
 
 
 @dataclass
@@ -81,15 +95,27 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def request_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) StreamingMylabellaSiteLister/1.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+
 def fetch_html(url: str, timeout: int) -> tuple[str, dict[str, Any]]:
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) StreamingMylabellaSiteLister/1.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    req = urllib.request.Request(url, headers=request_headers())
+    warnings: list[str] = []
+    try:
+        resp_ctx = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, ssl.SSLCertVerificationError):
+            warnings.append("tls_verification_failed_retrying_unverified")
+            resp_ctx = urllib.request.urlopen(
+                req, timeout=timeout, context=ssl._create_unverified_context()
+            )
+        else:
+            raise
+    with resp_ctx as resp:
         raw = resp.read()
         charset = resp.headers.get_content_charset() or "utf-8"
         html = raw.decode(charset, errors="replace")
@@ -99,6 +125,8 @@ def fetch_html(url: str, timeout: int) -> tuple[str, dict[str, Any]]:
             "bytes": len(raw),
             "final_url": resp.geturl(),
         }
+        if warnings:
+            meta["warnings"] = warnings
         return html, meta
 
 
@@ -122,6 +150,85 @@ def classify(url: str) -> str:
     if any(path.endswith(ext) for ext in MEDIA_EXTENSIONS):
         return "stream"
     return "page"
+
+
+def blocked_reason(url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        host = urllib.parse.urlsplit(url).netloc.lower().split(":", 1)[0]
+    except Exception:
+        return "invalid_url"
+    if host in BLOCKED_HOSTS:
+        return "blocked_or_notice_host"
+    return None
+
+
+def looks_like_stream(content_type: str | None, sample: bytes, url: str) -> bool:
+    path = urllib.parse.urlsplit(url).path.lower()
+    if any(path.endswith(ext) for ext in MEDIA_EXTENSIONS):
+        return True
+    ct = (content_type or "").lower()
+    if any(token in ct for token in ["mpegurl", "mp4", "video", "dash+xml", "octet-stream"]):
+        return True
+    if sample.startswith(b"#EXTM3U"):
+        return True
+    return False
+
+
+def probe_link(item: ExtractedLink, timeout: int) -> tuple[bool, str | None]:
+    reason = blocked_reason(item.url)
+    if reason:
+        return False, reason
+    if item.kind == "external":
+        return False, "external_unverifiable"
+    req = urllib.request.Request(item.url, headers={**request_headers(), "Accept": "*/*"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            final_reason = blocked_reason(resp.geturl())
+            if final_reason:
+                return False, "redirected_to_blocked_or_notice_host"
+            status = getattr(resp, "status", None)
+            if status is not None and not (200 <= status < 400):
+                return False, f"http_{status}"
+            sample = resp.read(4096)
+            if item.kind == "stream" and not looks_like_stream(
+                resp.headers.get("content-type"), sample, resp.geturl()
+            ):
+                return False, "not_stream_like"
+            return True, None
+    except urllib.error.HTTPError as exc:
+        return False, f"http_{exc.code}"
+    except urllib.error.URLError as exc:
+        return False, type(exc.reason).__name__ if exc.reason else "url_error"
+    except Exception as exc:
+        return False, type(exc).__name__
+
+
+def filter_working_links(items: list[ExtractedLink], timeout: int, workers: int) -> tuple[list[ExtractedLink], dict[str, int], list[dict[str, str]]]:
+    if not items:
+        return [], {}, []
+    rejected_counts: dict[str, int] = {}
+    rejected_sample: list[dict[str, str]] = []
+    keep_by_url: dict[str, bool] = {}
+    reason_by_url: dict[str, str | None] = {}
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(probe_link, item, timeout): item for item in items}
+        for fut in cf.as_completed(futures):
+            item = futures[fut]
+            ok, reason = fut.result()
+            keep_by_url[item.url] = ok
+            reason_by_url[item.url] = reason
+    working: list[ExtractedLink] = []
+    for item in items:
+        if keep_by_url.get(item.url):
+            working.append(item)
+        else:
+            reason = reason_by_url.get(item.url) or "unknown"
+            rejected_counts[reason] = rejected_counts.get(reason, 0) + 1
+            if len(rejected_sample) < 20:
+                rejected_sample.append({"title": item.title, "url": item.url, "reason": reason})
+    return working, rejected_counts, rejected_sample
 
 
 def title_from_url(url: str) -> str:
@@ -204,6 +311,9 @@ def main() -> int:
     ap.add_argument("--workspace", default=str(DEFAULT_WORKSPACE))
     ap.add_argument("--max-links", type=int, default=500)
     ap.add_argument("--timeout", type=int, default=30)
+    ap.add_argument("--probe-timeout", type=int, default=8)
+    ap.add_argument("--probe-workers", type=int, default=16)
+    ap.add_argument("--no-probe", action="store_true", help="Do not verify extracted links")
     ap.add_argument("--preview", action="store_true", help="Do not write output JSON")
     args = ap.parse_args()
 
@@ -225,7 +335,24 @@ def main() -> int:
 
     try:
         html, fetch_meta = fetch_html(args.url, timeout=args.timeout)
-        items = extract_links(html, fetch_meta.get("final_url") or args.url, max_links=args.max_links)
+        summary["warnings"].extend(fetch_meta.get("warnings", []))
+        final_reason = blocked_reason(fetch_meta.get("final_url"))
+        extracted_items = extract_links(html, fetch_meta.get("final_url") or args.url, max_links=args.max_links)
+        if final_reason:
+            items = []
+            rejected_counts = {"source_redirected_to_blocked_or_notice_host": len(extracted_items)}
+            rejected_sample = [
+                {"title": item.title, "url": item.url, "reason": "source_redirected_to_blocked_or_notice_host"}
+                for item in extracted_items[:20]
+            ]
+        elif args.no_probe:
+            items = [item for item in extracted_items if not blocked_reason(item.url)]
+            rejected_counts = {"blocked_or_notice_host": len(extracted_items) - len(items)} if len(items) != len(extracted_items) else {}
+            rejected_sample = []
+        else:
+            items, rejected_counts, rejected_sample = filter_working_links(
+                extracted_items, timeout=args.probe_timeout, workers=args.probe_workers
+            )
         stream_count = sum(1 for item in items if item.kind == "stream")
         page_count = sum(1 for item in items if item.kind == "page")
         external_count = sum(1 for item in items if item.kind == "external")
@@ -244,20 +371,29 @@ def main() -> int:
             "items": [asdict(item) for item in items],
         }
 
-        if not args.preview:
+        wrote_listing = False
+        if not items:
+            summary["warnings"].append("no_working_links_found_listing_not_written")
+        elif not args.preview:
             listing = load_listing(output)
             listing.setdefault("version", 1)
             listing.setdefault("sites", {})[site_name] = site_payload
             save_listing(output, listing)
+            wrote_listing = True
 
         summary.update(
             {
                 "success": True,
                 "fetch": fetch_meta,
+                "links_extracted": len(extracted_items),
                 "links_found": len(items),
+                "links_rejected": len(extracted_items) - len(items),
+                "rejected_counts": rejected_counts,
+                "rejected_sample": rejected_sample,
                 "media_links": stream_count,
                 "page_links": page_count,
                 "external_links": external_count,
+                "listing_written": wrote_listing,
                 "sample_items": [asdict(item) for item in items[:10]],
             }
         )

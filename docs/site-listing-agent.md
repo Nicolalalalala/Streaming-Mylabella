@@ -3,9 +3,9 @@
 Routine locale per aggiungere siti al catalogo Stremio `Streaming Mylabella` senza interpretare il contenuto.
 
 ## Scopo
-Dato un URL pubblico, lo script scarica l'HTML, estrae fedelmente i link e aggiorna il JSON usato dal Worker Stremio.
+Dato un URL pubblico, lo script scarica l'HTML, estrae fedelmente i link, verifica quali rispondono davvero e aggiorna il JSON usato dal Worker Stremio solo con quelli funzionanti.
 
-Non fa classificazione semantica. Non decide cosa sia "interessante". Prende link e basta, come una ruspa con un parser HTML.
+Non fa classificazione semantica. Non decide cosa sia "interessante". Prende link e basta, come una ruspa con un parser HTML; poi scarta redirect/blocchi tipo AGCOM e link che non rispondono.
 
 ## Path
 
@@ -60,5 +60,6 @@ nome: example
 
 - Content-blind: usare solo URL, link text e path del link.
 - Non bypassare login, paywall, DRM, CAPTCHA o challenge interattive.
+- Salvare solo link verificati come funzionanti; se il sito finisce su pagine di blocco/notifica, il listing non viene scritto.
 - Link streamabili: `.m3u8`, `.mp4`, `.webm`, `.mov`, `.mkv`, `.avi`, `.mpd`.
 - Link pagina: tutto il resto.
