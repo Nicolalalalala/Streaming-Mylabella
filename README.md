@@ -24,8 +24,12 @@ Workers & Pages → streaming-mylabella → Settings → Domains & Routes → Ad
 Poi in Stremio aggiungi l'URL dell'utente:
 
 ```text
-https://streaming.mylabella.it/nicola/manifest.json
+https://streaming.mylabella.it/<utente>/manifest.json
 ```
+
+Da PC: apri Stremio → Addon → aggiungi un nuovo addon usando quell'URL.
+
+Da Android/iPhone/iPad non si può aggiungere direttamente un addon via URL. Va fatto da PC: crea/configura l'utente lì, installa l'addon, poi fai login sull'app mobile con lo stesso account Stremio. La configurazione resta condivisa.
 
 ## Utenti
 
