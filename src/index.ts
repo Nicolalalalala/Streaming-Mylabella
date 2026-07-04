@@ -16,6 +16,8 @@ const SITE_ID_PREFIX = "site-";
 const IPTV_API = "https://iptv-org.github.io/api";
 const M3U_BASE =
   "https://raw.githubusercontent.com/iptv-org/iptv/master/streams";
+const DEFAULT_TV_POSTER = "https://img.icons8.com/color/96/tv.png";
+const DEFAULT_SITE_POSTER = "https://img.icons8.com/color/96/link.png";
 
 const DEFAULT_COUNTRY = "it";
 
@@ -77,12 +79,15 @@ type BlockedStreamsFile = {
 const SITE_LISTINGS = siteListings as SiteListingFile;
 const BLOCKED_STREAMS = new Set((blockedStreams as BlockedStreamsFile).blockedUrls);
 
-// ─── Cache categorie ───────────────────────────────────
+// ─── Cache categorie/loghi ─────────────────────────────
 
 type CategoriaMap = Map<string, string[]>;
+type LogoMap = Map<string, string>;
 
 let categoriaCache: CategoriaMap | null = null;
 let categoriaPromise: Promise<CategoriaMap> | null = null;
+let logoCache: LogoMap | null = null;
+let logoPromise: Promise<LogoMap> | null = null;
 
 /** Mappa nomi categoria inglese → italiano. */
 const NOMI_CATEGORIE: Record<string, string> = {
@@ -150,16 +155,79 @@ async function caricaCategorie(): Promise<CategoriaMap> {
   }
 }
 
+async function caricaLoghi(): Promise<LogoMap> {
+  if (logoCache) return logoCache;
+  if (logoPromise) {
+    try { return await logoPromise; } catch { /* riprova */ }
+  }
+
+  logoPromise = (async () => {
+    const resp = await fetch(`${IPTV_API}/logos.json`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const loghi = (await resp.json()) as Array<{
+      channel: string;
+      in_use?: boolean;
+      format?: string;
+      url: string;
+    }>;
+    const map: LogoMap = new Map();
+
+    for (const logo of loghi) {
+      if (!logo.channel || !logo.url) continue;
+      const format = logo.format?.toLowerCase();
+      const isRaster = !format || ["png", "jpg", "jpeg", "webp"].includes(format);
+      if (!map.has(logo.channel) && logo.in_use && isRaster) {
+        map.set(logo.channel, logo.url);
+      }
+    }
+
+    for (const logo of loghi) {
+      if (!logo.channel || !logo.url || map.has(logo.channel)) continue;
+      map.set(logo.channel, logo.url);
+    }
+
+    logoCache = map;
+    return map;
+  })();
+
+  try { return await logoPromise; } catch {
+    logoPromise = null;
+    return new Map();
+  }
+}
+
 // ─── Helpers ──────────────────────────────────────────
 
-function canaleToMeta(canale: Canale): Record<string, unknown> {
+function normalizzaTvgId(tvgId?: string): string | null {
+  if (!tvgId) return null;
+  return tvgId.replace(/@[A-Za-z0-9]+$/, "");
+}
+
+function logoCanale(canale: Canale, loghi: LogoMap): string {
+  const tvgId = normalizzaTvgId(canale.tvgId);
+  return (tvgId && loghi.get(tvgId)) || DEFAULT_TV_POSTER;
+}
+
+function faviconDaUrl(value: string): string {
+  try {
+    const host = new URL(value).hostname;
+    if (!host) return DEFAULT_SITE_POSTER;
+    return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&sz=128`;
+  } catch {
+    return DEFAULT_SITE_POSTER;
+  }
+}
+
+function canaleToMeta(canale: Canale, loghi: LogoMap): Record<string, unknown> {
   const id = ID_PREFIX + urlToId(canale.url);
   let nomeCompleto = canale.nome;
   if (canale.qualita) nomeCompleto += ` (${canale.qualita})`;
   if (canale.geoBlocked) nomeCompleto += " [Geo-blocked]";
+  const poster = logoCanale(canale, loghi);
   return {
     id, type: "tv", name: nomeCompleto,
-    poster: "https://img.icons8.com/color/96/tv.png",
+    poster,
+    logo: poster,
     description: canale.tvgId || "",
   };
 }
@@ -167,11 +235,13 @@ function canaleToMeta(canale: Canale): Record<string, unknown> {
 function siteItemToMeta(siteName: string, item: SiteItem): Record<string, unknown> {
   const id = SITE_ID_PREFIX + urlToId(item.url);
   const badge = item.kind === "stream" ? "stream" : "page";
+  const poster = faviconDaUrl(item.url);
   return {
     id,
     type: "tv",
     name: `[${badge}] ${item.title}`,
-    poster: "https://img.icons8.com/color/96/link.png",
+    poster,
+    logo: poster,
     description: `${siteName} · ${item.kind} · ${item.url}`,
     behaviorHints: { defaultVideoId: id },
   };
@@ -224,7 +294,7 @@ async function manifesto(): Promise<Response> {
     name: "Streaming Mylabella",
     version: "2.1.0",
     description: "Canali IPTV da iptv-org e listing siti — Cloudflare Workers.",
-    logo: "https://img.icons8.com/color/96/tv.png",
+    logo: DEFAULT_TV_POSTER,
     resources: ["catalog", "stream", "meta"],
     types: ["tv"],
     catalogs: [
@@ -271,16 +341,19 @@ async function catalogo(
 
   let contenuto: string;
   let catMap: CategoriaMap;
+  let loghi: LogoMap;
   try {
-    const [m3uResp] = await Promise.all([
+    const [m3uResp, catMapCaricata, loghiCaricati] = await Promise.all([
       fetch(m3uUrl),
       caricaCategorie(),
+      caricaLoghi(),
     ]);
     if (!m3uResp.ok) {
       return jsonResponse({ error: `Paese '${codice}' non trovato` }, 404);
     }
     contenuto = await m3uResp.text();
-    catMap = categoriaCache ?? new Map();
+    catMap = catMapCaricata;
+    loghi = loghiCaricati;
   } catch (e) {
     return jsonResponse({ error: `Errore: ${e}` }, 502);
   }
@@ -295,16 +368,16 @@ async function catalogo(
       categoria.toLowerCase();                    // già in inglese
 
     canali = canali.filter((c) => {
-      if (!c.tvgId) return false;
-      const idRaw = c.tvgId.replace(/@[A-Za-z0-9]+$/, "");
-      const cats = catMap.get(idRaw) ?? catMap.get(c.tvgId);
+      const idRaw = normalizzaTvgId(c.tvgId);
+      if (!idRaw) return false;
+      const cats = catMap.get(idRaw) ?? catMap.get(c.tvgId ?? "");
       return cats?.includes(catKey);
     });
   }
 
   canali.sort((a, b) => a.nome.localeCompare(b.nome, "it"));
 
-  return jsonResponse({ metas: canali.map(canaleToMeta) });
+  return jsonResponse({ metas: canali.map((canale) => canaleToMeta(canale, loghi)) });
 }
 
 function catalogoSiti(sito: string | null): Response {
@@ -363,8 +436,9 @@ async function metaHandler(id: string): Promise<Response> {
     try { url = idToUrl(raw); } catch {
       return jsonResponse({ error: "ID sito non valido" }, 404);
     }
+    const poster = faviconDaUrl(url);
     return jsonResponse({
-      meta: { id, type: "tv", name: "Link sito", description: url },
+      meta: { id, type: "tv", name: "Link sito", poster, logo: poster, description: url },
     });
   }
 
